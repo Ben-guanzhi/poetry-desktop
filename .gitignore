@@ -1,0 +1,8 @@
+# build output
+*.exe
+
+# crawler partial output
+*.progress.json
+
+# crawler output data (regenerable)
+tools/crawler/out/
