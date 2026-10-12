@@ -1,6 +1,7 @@
 package fetcher
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,11 +53,11 @@ func (d *Downloader) DownloadAndImport(ds model.Dataset) error {
 	// Download authors if needed
 	if ds.HasAuthors && ds.AuthorFile != "" {
 		d.report(ds.Name, ds.AuthorFile, 0, 1, "下载作者信息...")
-		if err := d.downloadFile(ds.Dir, ds.AuthorFile); err != nil {
+		if data, err := d.downloadFile(ds.Dir, ds.AuthorFile); err != nil {
 			d.report(ds.Name, ds.AuthorFile, 1, 1, "下载失败: "+err.Error())
 		} else {
 			d.report(ds.Name, ds.AuthorFile, 1, 1, "导入作者信息...")
-			if err := d.importAuthors(ds); err != nil {
+			if err := d.importAuthors(ds, data); err != nil {
 				d.report(ds.Name, ds.AuthorFile, 1, 1, "导入失败: "+err.Error())
 			}
 		}
@@ -70,12 +71,13 @@ func (d *Downloader) DownloadAndImport(ds model.Dataset) error {
 
 	for i, f := range files {
 		d.report(ds.Name, f, i, len(files), "下载...")
-		if err := d.downloadFile(ds.Dir, f); err != nil {
+		data, err := d.downloadFile(ds.Dir, f)
+		if err != nil {
 			d.report(ds.Name, f, i, len(files), "跳过: "+err.Error())
 			continue
 		}
 		d.report(ds.Name, f, i+1, len(files), "导入...")
-		if err := d.importPoems(ds, f); err != nil {
+		if err := d.importPoems(ds, f, data); err != nil {
 			d.report(ds.Name, f, i+1, len(files), "导入失败: "+err.Error())
 		}
 	}
@@ -108,7 +110,12 @@ func (d *Downloader) importLocalDataset(ds model.Dataset, dir string) error {
 	imported := 0
 	for i, f := range files {
 		d.report(ds.Name, f, i, len(files), "导入...")
-		if err := d.importPoems(ds, f); err != nil {
+		data, err := readPayload(filepath.Join(dir, f))
+		if err != nil {
+			d.report(ds.Name, f, i+1, len(files), "导入失败: "+err.Error())
+			continue
+		}
+		if err := d.importPoems(ds, f, data); err != nil {
 			d.report(ds.Name, f, i+1, len(files), "导入失败: "+err.Error())
 			continue
 		}
@@ -191,82 +198,93 @@ func (d *Downloader) remoteExists(dir, name string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func (d *Downloader) downloadFile(dir, name string) error {
+// downloadFile makes the named file available locally and returns its complete
+// payload, so the importer never opens the file a second time.
+func (d *Downloader) downloadFile(dir, name string) ([]byte, error) {
 	localPath := filepath.Join(d.dataDir, dir, name)
 	// Only a complete file counts as downloaded. An interrupted run may have
-	// left a partial .part file; it must not be mistaken for the payload, and
-	// an existing final file is trusted only when it parses (see importPoems).
-	if fi, err := os.Stat(localPath); err == nil && fi.Size() > 0 {
-		if d.validPayload(localPath) {
-			return nil
-		}
-		// Corrupt/truncated leftover: replace it rather than keep skipping.
+	// left a partial .part file, which must not be mistaken for the payload.
+	if data, err := readPayload(localPath); err == nil {
+		return data, nil
 	}
+	// Missing or corrupt/truncated leftover: replace it rather than keep
+	// importing what is already on disk.
 
 	partPath := localPath + ".part"
 	_ = os.Remove(partPath)
 	url := baseURL + urlEncode(dir) + "/" + urlEncode(name)
 	resp, err := httpClient.Get(url)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 404 {
-		return fmt.Errorf("not found")
+		return nil, fmt.Errorf("not found")
 	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("http %d", resp.StatusCode)
+		return nil, fmt.Errorf("http %d", resp.StatusCode)
 	}
 	f, err := os.Create(partPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	written, err := io.Copy(f, resp.Body)
+	// Tee the stream: write to the .part file and keep the bytes in hand, so
+	// importing needs no read-back.
+	var buf bytes.Buffer
+	written, err := io.Copy(io.MultiWriter(f, &buf), resp.Body)
 	closeErr := f.Close()
 	if err != nil {
 		_ = os.Remove(partPath)
-		return err
+		return nil, err
 	}
 	if closeErr != nil {
 		_ = os.Remove(partPath)
-		return closeErr
+		return nil, closeErr
 	}
 	// Reject a short transfer (interrupted body) instead of promoting a
 	// truncated file to the final name.
 	if resp.ContentLength > 0 && written != resp.ContentLength {
 		_ = os.Remove(partPath)
-		return fmt.Errorf("short download: got %d of %d bytes", written, resp.ContentLength)
+		return nil, fmt.Errorf("short download: got %d of %d bytes", written, resp.ContentLength)
 	}
 	if written == 0 {
 		_ = os.Remove(partPath)
-		return fmt.Errorf("empty download")
+		return nil, fmt.Errorf("empty download")
 	}
 	if err := os.Rename(partPath, localPath); err != nil {
 		_ = os.Remove(partPath)
-		return err
+		return nil, err
 	}
-	return nil
+	return buf.Bytes(), nil
+}
+
+// readPayload returns a locally complete JSON document, naming the file in the
+// error otherwise. Every payload in this repo is a JSON file, so "complete" is
+// decidable without parsing it for real: a truncated download (an interrupted
+// io.Copy, a half-written buffer) fails json.Valid and is re-fetched or
+// skipped instead of poisoning the corpus.
+//
+// This is the single place that opens a payload file. The downloaders return
+// its bytes to the importers, so a file is read exactly once per run instead
+// of once to validate and once to unmarshal.
+func readPayload(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 || !json.Valid(data) {
+		return nil, fmt.Errorf("%s 不是完整的 JSON 文件（可能上次下载中断）", filepath.Base(path))
+	}
+	return data, nil
 }
 
 // validPayload reports whether the local file is a complete JSON document.
-// Every payload in this repo is a JSON file; a truncated download (e.g. an
-// interrupted io.Copy) fails json.Valid and is re-downloaded on the next run
-// instead of being imported or poisoning resume.
 func (d *Downloader) validPayload(path string) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	return json.Valid(data)
+	_, err := readPayload(path)
+	return err == nil
 }
 
-func (d *Downloader) importAuthors(ds model.Dataset) error {
-	path := filepath.Join(d.dataDir, ds.Dir, ds.AuthorFile)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-
+func (d *Downloader) importAuthors(ds model.Dataset, data []byte) error {
 	tx, err := d.store.Begin()
 	if err != nil {
 		return err
@@ -315,13 +333,7 @@ func (d *Downloader) importAuthors(ds model.Dataset) error {
 	return tx.Commit()
 }
 
-func (d *Downloader) importPoems(ds model.Dataset, filename string) error {
-	path := filepath.Join(d.dataDir, ds.Dir, filename)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-
+func (d *Downloader) importPoems(ds model.Dataset, filename string, data []byte) error {
 	tx, err := d.store.Begin()
 	if err != nil {
 		return err
