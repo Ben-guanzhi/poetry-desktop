@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -50,6 +51,8 @@ var (
 	reParam = regexp.MustCompile(`\{\{\{[^{}]*\}\}\}`)
 	// Broken templates rendered as literal "{{*|…}" in the HTML
 	reBraceRemnant = regexp.MustCompile(`\{\{[^{}]*\}`)
+	// Literal wiki links that escaped parsing, e.g. [[./卷094上|匈奴传]]
+	reWikiLinkText = regexp.MustCompile(`\[\[(?:[^\]|]*\|)?([^\]]*)\]\]`)
 	// Page-title segments like "卷001"/"01"/"卷十三" that carry no chapter meaning
 	reNumericName = regexp.MustCompile(`^(卷)?[0-9０-９一二三四五六七八九十百零〇两]{1,8}(卷)?$`)
 	// 《》 decorations around index link display text
@@ -144,11 +147,36 @@ func crawlBook(bookName, tradName, outputFile string) (*Book, error) {
 	// Resume support: chapters already crawled (recorded in the sidecar
 	// progress file) are reused instead of re-fetched.
 	done := loadProgress(outputFile, tradName)
+	idxKey := "INDEX:" + tradName
+	idxChars := indexBodyChars(indexParas)
+
+	// Walk pages in document order and look each one up in done, so resumed
+	// chapters keep the book's own order. range-ing the map directly used to
+	// emit them in Go's randomized map order, leaving the finished book as
+	// [shuffled old chapters] + [ordered new chapters].
+	placed := make(map[string]bool, len(pages))
 	chapters := make([]Chapter, 0, len(pages)+1)
-	for _, e := range done {
-		chapters = append(chapters, e.Chapter)
+	for _, page := range pages {
+		if e, ok := done[page]; ok {
+			chapters = append(chapters, e.Chapter)
+			placed[page] = true
+		}
 	}
-	fmt.Printf("Resuming: %d chapters already crawled\n", len(done))
+	// Chapters whose page is no longer listed (renamed upstream, or filtered out
+	// as 全覽) would otherwise vanish from the book. Keep them, sorted by key so
+	// the order is deterministic. The synthetic INDEX: entry is placed
+	// explicitly below when it qualifies.
+	var strays []string
+	for key := range done {
+		if !placed[key] && !(key == idxKey && idxChars >= 500) {
+			strays = append(strays, key)
+		}
+	}
+	sort.Strings(strays)
+	for _, key := range strays {
+		chapters = append(chapters, done[key].Chapter)
+	}
+	fmt.Printf("Resuming: %d chapters already crawled\n", len(chapters))
 
 	book := &Book{Name: bookName, Chapters: chapters}
 
@@ -156,9 +184,8 @@ func crawlBook(bookName, tradName, outputFile string) (*Book, error) {
 	// subpages only for editions/annotations. If the index body is substantial
 	// (>= 500 chars, far above the ~400 max seen for true index pages), it
 	// becomes the first chapter under the book's own name.
-	if chars := indexBodyChars(indexParas); chars >= 500 {
-		idxKey := "INDEX:" + tradName
-		fmt.Printf("Index page holds the book's body text (%d chars)\n", chars)
+	if idxChars >= 500 {
+		fmt.Printf("Index page holds the book's body text (%d chars)\n", idxChars)
 		if e, ok := done[idxKey]; ok {
 			// keep position: re-insert at front
 			book.Chapters = append([]Chapter{e.Chapter}, book.Chapters...)
@@ -408,8 +435,13 @@ func fetchChapter(bookName, pageName, nameHint string) (*Chapter, error) {
 	}
 	// "卷001"-style page titles make poor chapter names; prefer the index
 	// link's display text (e.g. 五帝本纪第一), which is already zh-hans.
+	// Hints must look like chapter titles: contain a structural keyword and
+	// be short, punctuation-free — quote excerpts on some indexes are rejected.
 	if nameHint != "" && reNumericName.MatchString(chapterName) {
-		chapterName = simplifyIfTraditional(nameHint, 1)
+		if len([]rune(nameHint)) <= 16 && !strings.ContainsAny(nameHint, "。，；？！、：“”") &&
+			strings.ContainsAny(nameHint, "篇传纪志卷第表序论书赞本典谏说章疏议对") {
+			chapterName = simplifyIfTraditional(nameHint, 1)
+		}
 	}
 
 	return &Chapter{
@@ -639,6 +671,7 @@ func blockText(n *html.Node) []string {
 	for _, line := range strings.Split(sb.String(), "\n") {
 		line = reParam.ReplaceAllString(line, "")
 		line = reBraceRemnant.ReplaceAllString(line, "")
+		line = reWikiLinkText.ReplaceAllString(line, "$1")
 		line = reSpaces.ReplaceAllString(strings.TrimSpace(line), " ")
 		if line != "" {
 			lines = append(lines, line)
@@ -820,6 +853,17 @@ func toTraditional(name string) string {
 		"说苑":   "說苑",
 		"盐铁论":  "鹽鐵論",
 		"抱朴子":  "抱樸子",
+		"贞观政要": "貞觀政要",
+		"潜夫论":  "潛夫論",
+		"新语":   "新語",
+		"水经注":  "水經注",
+		"商君书":  "商君書",
+		"韩诗外传": "韓詩外傳",
+		"文心雕龙": "文心雕龍",
+		"风俗通义": "風俗通義",
+		"申鉴":   "申鑒",
+		"六韬":   "六韜",
+		"中论":   "中論",
 	}
 	if trad, ok := mapping[name]; ok {
 		return trad
