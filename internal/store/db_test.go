@@ -23,8 +23,8 @@ func TestMigrateCreatesSchemaAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getSchemaVersion: %v", err)
 	}
-	if v != 2 {
-		t.Fatalf("schema version = %d, want 2", v)
+	if v != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", v, schemaVersion)
 	}
 }
 
@@ -271,7 +271,7 @@ func TestMigratePreservesCollections(t *testing.T) {
 	if m != 2 {
 		t.Fatalf("collections = %d rows after re-adding, want 2", m)
 	}
-	if v, err := s2.getSchemaVersion(); err != nil || v != 2 {
-		t.Fatalf("schema version = %d, %v; want 2", v, err)
+	if v, err := s2.getSchemaVersion(); err != nil || v != schemaVersion {
+		t.Fatalf("schema version = %d, %v; want %d", v, err, schemaVersion)
 	}
 }

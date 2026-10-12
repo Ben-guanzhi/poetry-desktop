@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"poetry-desktop/internal/model"
 
@@ -40,8 +41,12 @@ func New(dataDir string) (*Store, error) {
 	return s, nil
 }
 
+// schemaVersion is what a freshly migrated database reports in meta.
+// 2 introduced the poems/authors/meta tables; 3 rebuilt poems_fts (see
+// migrateFTSToTrigram) because the v2 index could not match Chinese text at all.
+const schemaVersion = 3
+
 func (s *Store) migrate() error {
-	// Check schema version and migrate if needed
 	version, err := s.getSchemaVersion()
 	if err != nil {
 		return err
@@ -51,8 +56,26 @@ func (s *Store) migrate() error {
 		// Old schema - need to migrate
 		return s.migrateFromOldSchema()
 	}
-
+	if version < schemaVersion {
+		return s.migrateFTSToTrigram()
+	}
 	return nil
+}
+
+// migrateFTSToTrigram rebuilds the search index for v3 without touching the
+// poems table: the index is derived data, so dropping it costs time only.
+func (s *Store) migrateFTSToTrigram() error {
+	if _, err := s.db.Exec(`DROP TABLE IF EXISTS poems_fts`); err != nil {
+		return err
+	}
+	if err := s.createFTS(); err != nil {
+		return err
+	}
+	if err := s.RebuildFTS(); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)`, schemaVersion)
+	return err
 }
 
 func (s *Store) getSchemaVersion() (int, error) {
@@ -178,17 +201,7 @@ CREATE TABLE meta (
 		_, _ = s.db.Exec(stmt)
 	}
 
-	// Create FTS table
-	_, err = s.db.Exec(`
-		CREATE VIRTUAL TABLE poems_fts USING fts5(
-			content,
-			author,
-			title,
-			content_rowid=rowid,
-			content=poems
-		)
-	`)
-	if err != nil {
+	if err := s.createFTS(); err != nil {
 		return err
 	}
 
@@ -216,8 +229,9 @@ CREATE TABLE meta (
 		}
 	}
 
-	// Set version
-	_, err = s.db.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2')`)
+	// Set version: this path already builds the v3 FTS schema through
+	// createFTS, so a fresh database lands directly on the latest version.
+	_, err = s.db.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)`, schemaVersion)
 	return err
 }
 
@@ -269,12 +283,71 @@ func (s *Store) ImportAuthors(tx *sql.Tx, authors []model.Author) error {
 	return nil
 }
 
-func (s *Store) RebuildFTS() error {
+// createFTS builds the search index plus the triggers that keep it honest.
+//
+// tokenize='trigram' is mandatory, not cosmetic: the default unicode61
+// tokenizer does not tokenize CJK at all in the SQLite build this project
+// links (modernc.org/sqlite), so every Chinese query matched zero rows and
+// the index was dead weight. Trigram matches substrings, which is the same
+// semantics SearchPoems' LIKE '%q%' gives users, so the two search paths
+// agree on what a query means.
+func (s *Store) createFTS() error {
 	_, err := s.db.Exec(`
-		INSERT INTO poems_fts(rowid, content, author, title)
-		SELECT rowid, content, author, title FROM poems
-		WHERE rowid NOT IN (SELECT rowid FROM poems_fts)
+		CREATE VIRTUAL TABLE poems_fts USING fts5(
+			content,
+			author,
+			title,
+			chapter,
+			content_rowid=rowid,
+			content=poems,
+			tokenize='trigram'
+		)
 	`)
+	if err != nil {
+		return err
+	}
+	// External content means FTS5 stores only pointers into poems, so it
+	// cannot maintain itself and the index would drift on every write. These
+	// triggers replace the session-end O(N) sweep RebuildFTS used to be the
+	// only maintenance.
+	_, err = s.db.Exec(`
+		CREATE TRIGGER poems_fts_ins AFTER INSERT ON poems BEGIN
+			INSERT INTO poems_fts(rowid, content, author, title, chapter)
+			VALUES (new.rowid, new.content, new.author, new.title, new.chapter);
+		END
+	`)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+		CREATE TRIGGER poems_fts_del AFTER DELETE ON poems BEGIN
+			INSERT INTO poems_fts(poems_fts, rowid, content, author, title, chapter)
+			VALUES ('delete', old.rowid, old.content, old.author, old.title, old.chapter);
+		END
+	`)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+		CREATE TRIGGER poems_fts_upd AFTER UPDATE OF content, author, title, chapter ON poems BEGIN
+			INSERT INTO poems_fts(poems_fts, rowid, content, author, title, chapter)
+			VALUES ('delete', old.rowid, old.content, old.author, old.title, old.chapter);
+			INSERT INTO poems_fts(rowid, content, author, title, chapter)
+			VALUES (new.rowid, new.content, new.author, new.title, new.chapter);
+		END
+	`)
+	return err
+}
+
+// RebuildFTS resyncs the whole index from poems. It is a repair and a final
+// check for the importers, not the normal maintenance path: triggers do that.
+// The 'rebuild' command re-derives every entry from the content table, so it
+// also heals drift and clears rowids that are not in poems; a hand-written
+// INSERT of a rowid the index already holds is an error for an
+// external-content table, which is what the previous NOT IN version did the
+// moment the triggers had already indexed a row.
+func (s *Store) RebuildFTS() error {
+	_, err := s.db.Exec(`INSERT INTO poems_fts(poems_fts) VALUES ('rebuild')`)
 	return err
 }
 
@@ -459,13 +532,69 @@ func (s *Store) PoemCountByDataset(dir string) (int, error) {
 	return n, err
 }
 
+// SearchPoems searches the corpus for q, using the FTS5 index when it can
+// serve the query and the LIKE scan when it cannot.
+//
+// The fallback is not a courtesy: the trigram tokenizer cannot match terms
+// shorter than trigramMinChars, and it reports that as zero rows rather than
+// an error, so a two-character term would silently come back empty and read to
+// the user as "nothing matches" while the same text sits in the table.
 func (s *Store) SearchPoems(q string, limit, offset int) ([]model.Poem, error) {
-	like := "%" + q + "%"
+	ftsQuery, ok := buildFTSQuery(q)
+	if ok {
+		poems, err := s.searchFTS(ftsQuery, limit, offset)
+		if err == nil {
+			return poems, nil
+		}
+		// Fall through. An error here means the index cannot answer the query
+		// (missing table, parser rejection, corrupted index); the LIKE scan is
+		// the honest answer, not an empty result set.
+	}
+	return s.searchLike(q, limit, offset)
+}
+
+// trigramMinChars is the shortest term the trigram tokenizer can match: it
+// tokenizes into 3-character grams, so a shorter input matches nothing.
+const trigramMinChars = 3
+
+// buildFTSQuery turns a raw search string into an FTS5 query poems_fts can
+// serve, reporting false when it cannot.
+//
+// Each whitespace-separated term is sent as a quoted phrase: a quoted string
+// is a literal substring with no FTS5 operators in it, so the query can never
+// be rejected because of quotes, brackets or other punctuation the user typed.
+// Terms are ANDed.
+func buildFTSQuery(q string) (string, bool) {
+	terms := strings.Fields(q)
+	if len(terms) == 0 {
+		return "", false
+	}
+	parts := make([]string, len(terms))
+	for i, term := range terms {
+		if utf8.RuneCountInString(term) < trigramMinChars {
+			return "", false
+		}
+		parts[i] = ftsPhrase(term)
+	}
+	return strings.Join(parts, " AND "), true
+}
+
+// ftsPhrase quotes one term for MATCH. Inside a quoted string only the double
+// quote needs escaping, and it is escaped by doubling it.
+func ftsPhrase(term string) string {
+	return `"` + strings.ReplaceAll(term, `"`, `""`) + `"`
+}
+
+// searchFTS answers one already-validated FTS5 query. Results are ordered by
+// relevance, with rowid as a tiebreaker so pages stay stable.
+func (s *Store) searchFTS(ftsQuery string, limit, offset int) ([]model.Poem, error) {
 	rows, err := s.db.Query(`
-		SELECT id, dynasty, author, title, rhythmic, content, tags, chapter, section, poem_type FROM poems
-		WHERE title LIKE ? OR author LIKE ? OR content LIKE ? OR chapter LIKE ?
-		ORDER BY title LIMIT ? OFFSET ?
-	`, like, like, like, like, limit, offset)
+		SELECT p.id, p.dynasty, p.author, p.title, p.rhythmic, p.content, p.tags, p.chapter, p.section, p.poem_type
+		FROM poems p
+		JOIN poems_fts f ON p.rowid = f.rowid
+		WHERE f MATCH ?
+		ORDER BY rank, p.rowid LIMIT ? OFFSET ?
+	`, ftsQuery, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -473,22 +602,16 @@ func (s *Store) SearchPoems(q string, limit, offset int) ([]model.Poem, error) {
 	return scanPoems(rows)
 }
 
-func (s *Store) SearchPoemsFTS(q string, limit, offset int) ([]model.Poem, error) {
-	words := strings.Fields(q)
-	if len(words) == 0 {
-		return nil, nil
-	}
-	for i := range words {
-		words[i] = words[i] + "*"
-	}
-	ftsQuery := strings.Join(words, " AND ")
+// searchLike is the whole-corpus scan SearchPoems falls back to. LIKE is
+// substring matching, which is the semantics the trigram index matches too, so
+// switching paths changes ordering (title vs relevance), never recall.
+func (s *Store) searchLike(q string, limit, offset int) ([]model.Poem, error) {
+	like := "%" + q + "%"
 	rows, err := s.db.Query(`
-		SELECT p.id, p.dynasty, p.author, p.title, p.rhythmic, p.content, p.tags, p.chapter, p.section, p.poem_type
-		FROM poems p
-		JOIN poems_fts f ON p.rowid = f.rowid
-		WHERE poems_fts MATCH ?
-		ORDER BY rank LIMIT ? OFFSET ?
-	`, ftsQuery, limit, offset)
+		SELECT id, dynasty, author, title, rhythmic, content, tags, chapter, section, poem_type FROM poems
+		WHERE title LIKE ? OR author LIKE ? OR content LIKE ? OR chapter LIKE ?
+		ORDER BY title LIMIT ? OFFSET ?
+	`, like, like, like, like, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -625,13 +748,12 @@ func (s *Store) ListCollections(limit, offset int) ([]model.Poem, error) {
 	return scanPoems(rows)
 }
 
-// ClearAllPoems removes all poems, collections and FTS index entries.
+// ClearAllPoems removes all poems and collections. The FTS index needs no
+// separate wipe: the AFTER DELETE trigger clears an entry as each poem goes,
+// and deleting poems_fts first would make that trigger's 'delete' command fail
+// on entries that are already gone.
 func (s *Store) ClearAllPoems() error {
-	_, err := s.db.Exec(`DELETE FROM poems_fts`)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec(`DELETE FROM collections`)
+	_, err := s.db.Exec(`DELETE FROM collections`)
 	if err != nil {
 		return err
 	}

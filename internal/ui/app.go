@@ -642,7 +642,11 @@ func (ui *AppUI) performSearch(q string) {
 		return
 	}
 	_ = ui.store.AddSearchHistory(q)
-	poems, _ := ui.store.SearchPoems(q, 200, 0)
+	poems, err := ui.store.SearchPoems(q, 200, 0)
+	if err != nil {
+		dialog.ShowError(err, ui.window)
+		return
+	}
 	ui.poems = poems
 	ui.listRebuild = func() { ui.performSearch(q) }
 	list := ui.makePoemList()
