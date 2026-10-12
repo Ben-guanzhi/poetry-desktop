@@ -45,31 +45,96 @@ var favIcon = fyne.NewStaticResource("star", []byte(`<svg xmlns="http://www.w3.o
 
 var brightnessIcon = fyne.NewStaticResource("brightness", []byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="black" d="M20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12 20 8.69zM12 18a6 6 0 1 1 0-12 6 6 0 0 1 0 12z"/></svg>`))
 
-var navItems = []struct {
-	Title string
-	Icon  fyne.Resource
-}{
-	{"今日推荐", theme.HomeIcon()},
-	{"唐诗", theme.DocumentIcon()},
-	{"宋词", theme.DocumentIcon()},
-	{"元曲", theme.DocumentIcon()},
-	{"五代诗词", theme.DocumentIcon()},
-	{"花间集", theme.DocumentIcon()},
-	{"纳兰性德", theme.DocumentIcon()},
-	{"四书（部分）", theme.DocumentIcon()},
-	{"论语", theme.DocumentIcon()},
-	{"诗经", theme.DocumentIcon()},
-	{"蒙学", theme.DocumentIcon()},
-	{"楚辞", theme.DocumentIcon()},
-	{"曹操诗集", theme.DocumentIcon()},
-	{"幽梦影", theme.DocumentIcon()},
-	{"水墨唐诗", theme.DocumentIcon()},
-	{"御定全唐詩", theme.DocumentIcon()},
-	{"维基文库", theme.DocumentIcon()},
-	{"搜索", theme.SearchIcon()},
-	{"收藏", favIcon},
-	{"设置", theme.SettingsIcon()},
+// navKind says what a sidebar entry does. Entries carry their intent instead
+// of being reached by position, so inserting, moving or renaming an entry
+// cannot silently stop routing to the right page.
+type navKind int
+
+const (
+	navHome navKind = iota
+	navDynasty
+	navDataset
+	navSearch
+	navCollections
+	navSettings
+)
+
+type navItem struct {
+	Title   string
+	Kind    navKind
+	Dynasty model.Dynasty
+	Dataset string
 }
+
+// iconFor keeps the sidebar icon policy in one place: only the four special
+// pages have their own icon, every dynasty and dataset entry shares one.
+func iconFor(k navKind) fyne.Resource {
+	switch k {
+	case navHome:
+		return theme.HomeIcon()
+	case navSearch:
+		return theme.SearchIcon()
+	case navCollections:
+		return favIcon
+	case navSettings:
+		return theme.SettingsIcon()
+	}
+	return theme.DocumentIcon()
+}
+
+var navItems = []navItem{
+	{Title: "今日推荐", Kind: navHome},
+	{Title: "唐诗", Kind: navDynasty, Dynasty: model.DynastyTang},
+	{Title: "宋词", Kind: navDynasty, Dynasty: model.DynastySong},
+	{Title: "元曲", Kind: navDynasty, Dynasty: model.DynastyYuan},
+	{Title: "五代诗词", Kind: navDynasty, Dynasty: model.DynastyFive},
+	{Title: "花间集", Kind: navDataset, Dataset: "花间集"},
+	{Title: "纳兰性德", Kind: navDataset, Dataset: "纳兰性德"},
+	{Title: "四书（部分）", Kind: navDataset, Dataset: "四书（部分）"},
+	{Title: "论语", Kind: navDataset, Dataset: "论语"},
+	{Title: "诗经", Kind: navDataset, Dataset: "诗经"},
+	{Title: "蒙学", Kind: navDataset, Dataset: "蒙学"},
+	{Title: "楚辞", Kind: navDataset, Dataset: "楚辞"},
+	{Title: "曹操诗集", Kind: navDataset, Dataset: "曹操诗集"},
+	{Title: "幽梦影", Kind: navDataset, Dataset: "幽梦影"},
+	{Title: "水墨唐诗", Kind: navDataset, Dataset: "水墨唐诗"},
+	{Title: "御定全唐詩", Kind: navDataset, Dataset: "御定全唐詩"},
+	{Title: "维基文库", Kind: navDataset, Dataset: "维基文库"},
+	{Title: "搜索", Kind: navSearch},
+	{Title: "收藏", Kind: navCollections},
+	{Title: "设置", Kind: navSettings},
+}
+
+// navAt returns the entry at id. Out-of-range ids report ok=false rather than
+// panicking, so a stale currentNav degrades to a no-op.
+func navAt(id int) (navItem, bool) {
+	if id < 0 || id >= len(navItems) {
+		return navItem{}, false
+	}
+	return navItems[id], true
+}
+
+// navIndex is the reverse lookup the jump buttons use. An unknown title yields
+// -1, which navAt turns into a no-op.
+func navIndex(title string) int {
+	for i, it := range navItems {
+		if it.Title == title {
+			return i
+		}
+	}
+	return -1
+}
+
+// 列表取数上限集中在这一处。同一语义的上限散落在各调用点时，改一页忘一页
+// 就会让浏览、收藏和导出可见的数据量悄悄不一致，且没有一处能看出「这是同一
+// 个策略」。
+const (
+	browsePageSize  = 200   // 按朝代浏览的第一页
+	datasetPageSize = 500   // 按数据集浏览的第一页
+	auxPageSize     = 1000  // 作者列表 / 书目列表 / 单作者或单书目的明细
+	collectionLimit = 1000  // 收藏页可见上限
+	exportLimit     = 10000 // 导出用：接近全量
+)
 
 func NewAppUI(a fyne.App, w fyne.Window, dataDir string) *AppUI {
 	s, err := store.New(dataDir)
@@ -117,48 +182,30 @@ func (ui *AppUI) refreshCurrentView() {
 
 func (ui *AppUI) navigateTo(id int) {
 	ui.currentNav = id
-	switch id {
-	case 0:
+	it, ok := navAt(id)
+	if !ok {
+		return
+	}
+	switch it.Kind {
+	case navHome:
 		ui.loadHome()
-	case 1:
-		ui.loadBrowse(model.DynastyTang)
-	case 2:
-		ui.loadBrowse(model.DynastySong)
-	case 3:
-		ui.loadBrowse(model.DynastyYuan)
-	case 4:
-		ui.loadBrowse(model.DynastyFive)
-	case 5:
-		ui.loadDatasetByName("花间集")
-	case 6:
-		ui.loadDatasetByName("纳兰性德")
-	case 7:
-		ui.loadDatasetByName("四书（部分）")
-	case 8:
-		ui.loadDatasetByName("论语")
-	case 9:
-		ui.loadDatasetByName("诗经")
-	case 10:
-		ui.loadDatasetByName("蒙学")
-	case 11:
-		ui.loadDatasetByName("楚辞")
-	case 12:
-		ui.loadDatasetByName("曹操诗集")
-	case 13:
-		ui.loadDatasetByName("幽梦影")
-	case 14:
-		ui.loadDatasetByName("水墨唐诗")
-	case 15:
-		ui.loadDatasetByName("御定全唐詩")
-	case 16:
-		ui.loadDatasetByName("维基文库")
-	case 17:
+	case navDynasty:
+		ui.loadBrowse(it.Dynasty)
+	case navDataset:
+		ui.loadDatasetByName(it.Dataset)
+	case navSearch:
 		ui.loadSearch()
-	case 18:
+	case navCollections:
 		ui.loadCollections()
-	case 19:
+	case navSettings:
 		ui.loadSettings()
 	}
+}
+
+// isOn reports whether the sidebar is currently showing a page of kind k.
+func (ui *AppUI) isOn(k navKind) bool {
+	it, ok := navAt(ui.currentNav)
+	return ok && it.Kind == k
 }
 
 func (ui *AppUI) buildUI() {
@@ -174,8 +221,12 @@ func (ui *AppUI) buildUI() {
 			box := item.(*fyne.Container)
 			icon := box.Objects[0].(*widget.Icon)
 			label := box.Objects[1].(*widget.Label)
-			icon.SetResource(navItems[id].Icon)
-			label.SetText(navItems[id].Title)
+			it, ok := navAt(id)
+			if !ok {
+				return
+			}
+			icon.SetResource(iconFor(it.Kind))
+			label.SetText(it.Title)
 		},
 	)
 	ui.navList.OnSelected = func(id widget.ListItemID) {
@@ -185,7 +236,7 @@ func (ui *AppUI) buildUI() {
 	ui.searchEntry = widget.NewEntry()
 	ui.searchEntry.SetPlaceHolder("搜索诗词、作者...")
 	ui.searchEntry.OnSubmitted = func(q string) {
-		ui.navigateTo(16)
+		ui.navigateTo(navIndex("维基文库"))
 		ui.performSearch(q)
 	}
 
@@ -198,7 +249,7 @@ func (ui *AppUI) buildUI() {
 	})
 
 	searchBtn := widget.NewButtonWithIcon("", theme.SearchIcon(), func() {
-		ui.navigateTo(16)
+		ui.navigateTo(navIndex("维基文库"))
 		ui.performSearch(ui.searchEntry.Text)
 	})
 
@@ -256,7 +307,7 @@ func (ui *AppUI) loadDatasetByName(name string) {
 func (ui *AppUI) loadBrowse(dynasty model.Dynasty) {
 	ui.selectedDynasty = dynasty
 	ui.listRebuild = func() { ui.loadBrowse(dynasty) }
-	poems, _ := ui.store.ListPoemsByDynasty(dynasty, 200, 0)
+	poems, _ := ui.store.ListPoemsByDynasty(dynasty, browsePageSize, 0)
 	ui.poems = poems
 	list := ui.makePoemList()
 
@@ -270,7 +321,7 @@ func (ui *AppUI) loadBrowseByDataset(ds model.Dataset) {
 	ui.selectedDynasty = ds.Dynasty
 	ui.listRebuild = func() { ui.loadBrowseByDataset(ds) }
 
-	poems, _ := ui.store.ListPoemsByDataset(ds.Dir, 500, 0)
+	poems, _ := ui.store.ListPoemsByDataset(ds.Dir, datasetPageSize, 0)
 	ui.poems = poems
 	list := ui.makePoemList()
 
@@ -307,7 +358,7 @@ func (ui *AppUI) loadBrowseByDataset(ds model.Dataset) {
 // output groups chapters under a book name).
 func (ui *AppUI) loadBookList(ds model.Dataset) {
 	ui.listRebuild = func() { ui.loadBookList(ds) }
-	books, _ := ui.store.ListBooksFromDataset(ds.Dir, 1000, 0)
+	books, _ := ui.store.ListBooksFromDataset(ds.Dir, auxPageSize, 0)
 
 	if len(books) == 0 {
 		ui.setContent(container.NewCenter(widget.NewLabel("暂无书目\n\n请先在设置中导入数据")))
@@ -346,7 +397,7 @@ func (ui *AppUI) loadBookList(ds model.Dataset) {
 
 func (ui *AppUI) loadBookPoems(ds model.Dataset, book string) {
 	ui.listRebuild = func() { ui.loadBookPoems(ds, book) }
-	poems, _ := ui.store.ListPoemsByBookInDataset(ds.Dir, book, 1000, 0)
+	poems, _ := ui.store.ListPoemsByBookInDataset(ds.Dir, book, auxPageSize, 0)
 	ui.poems = poems
 	list := ui.makePoemList()
 
@@ -361,7 +412,7 @@ func (ui *AppUI) loadBookPoems(ds model.Dataset, book string) {
 
 func (ui *AppUI) loadAuthorList(dynasty model.Dynasty) {
 	ui.listRebuild = func() { ui.loadAuthorList(dynasty) }
-	authors, _ := ui.store.ListAuthorsFromPoems(dynasty, 1000, 0)
+	authors, _ := ui.store.ListAuthorsFromPoems(dynasty, auxPageSize, 0)
 
 	list := widget.NewList(
 		func() int { return len(authors) },
@@ -390,7 +441,7 @@ func (ui *AppUI) loadAuthorList(dynasty model.Dynasty) {
 
 func (ui *AppUI) loadAuthorPoems(author string) {
 	ui.listRebuild = func() { ui.loadAuthorPoems(author) }
-	poems, _ := ui.store.ListPoemsByAuthor(author, 1000, 0)
+	poems, _ := ui.store.ListPoemsByAuthor(author, auxPageSize, 0)
 	ui.poems = poems
 	list := ui.makePoemList()
 
@@ -663,7 +714,7 @@ func (ui *AppUI) loadCollections() {
 	ui.listRebuild = func() { ui.loadCollections() }
 	ui.poems = nil
 
-	poems, _ := ui.store.ListCollections(1000, 0)
+	poems, _ := ui.store.ListCollections(collectionLimit, 0)
 	ui.poems = poems
 
 	if len(poems) == 0 {
@@ -671,7 +722,7 @@ func (ui *AppUI) loadCollections() {
 			widget.NewLabel("暂无收藏\n\n在诗词阅读页面点击\"收藏\"按钮即可收藏诗词"),
 			widget.NewSeparator(),
 			widget.NewButtonWithIcon("浏览诗词", theme.HomeIcon(), func() {
-				ui.navigateTo(0)
+				ui.navigateTo(navIndex("今日推荐"))
 			}),
 		}
 		ui.setContent(container.NewScroll(container.NewVBox(items...)))
@@ -702,7 +753,7 @@ func (ui *AppUI) loadCollections() {
 }
 
 func (ui *AppUI) exportCollections() {
-	poems, _ := ui.store.ListCollections(10000, 0)
+	poems, _ := ui.store.ListCollections(exportLimit, 0)
 	if len(poems) == 0 {
 		dialog.ShowInformation("提示", "暂无收藏，无法导出", ui.window)
 		return
@@ -811,7 +862,7 @@ func (ui *AppUI) loadSettings() {
 					_ = f.DownloadAndImport(ds)
 				}
 				fyne.Do(func() {
-					if ui.currentNav == 19 {
+					if ui.isOn(navSettings) {
 						ui.loadSettings()
 					}
 				})
@@ -880,7 +931,7 @@ func (ui *AppUI) downloadDataset(ds model.Dataset) {
 		fmt.Printf("download error: %v\n", err)
 	}
 	fyne.Do(func() {
-		if ui.currentNav == 19 {
+		if ui.isOn(navSettings) {
 			ui.loadSettings()
 		}
 	})

@@ -1,6 +1,9 @@
 # build output
 *.exe
 
+# local scratch files
+*.tmp
+
 # crawler partial output
 *.progress.json
 

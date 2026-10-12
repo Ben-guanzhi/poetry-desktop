@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -528,25 +527,15 @@ func (d *Downloader) report(dataset, file string, current, total int, msg string
 }
 
 // ---------- JSON structs ----------
-
-type tangPoem struct {
-	Author     string   `json:"author"`
-	Paragraphs []string `json:"paragraphs"`
-	Title      string   `json:"title"`
-	ID         string   `json:"id"`
-	Tags       []string `json:"tags"`
-}
+//
+// Only the author files get a shape of their own. Poems are read as
+// map[string]any and normalised in normalisePoem, so no per-dynasty poem
+// struct is needed here.
 
 type tangAuthor struct {
 	Desc string `json:"desc"`
 	Name string `json:"name"`
 	ID   string `json:"id"`
-}
-
-type songCi struct {
-	Author     string   `json:"author"`
-	Paragraphs []string `json:"paragraphs"`
-	Rhythmic   string   `json:"rhythmic"`
 }
 
 type songCiAuthor struct {
@@ -555,54 +544,6 @@ type songCiAuthor struct {
 	Dynasty     string `json:"dynasty"`
 }
 
-type yuanQu struct {
-	Dynasty    string   `json:"dynasty"`
-	Author     string   `json:"author"`
-	Paragraphs []string `json:"paragraphs"`
-	Title      string   `json:"title"`
-}
-
 func urlEncode(s string) string {
 	return url.PathEscape(s)
-}
-
-func EstimateDownloaded(dataDir string, ds model.Dataset) int {
-	dir := filepath.Join(dataDir, ds.Dir)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0
-	}
-	count := 0
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		if name == ds.AuthorFile {
-			continue
-		}
-		switch ds.PoemPattern {
-		case "poet.tang.%d.json", "poet.song.%d.json":
-			base := strings.TrimPrefix(name, "poet.")
-			base = strings.TrimSuffix(base, ".json")
-			parts := strings.Split(base, ".")
-			if len(parts) == 2 {
-				if n, err := strconv.Atoi(parts[1]); err == nil {
-					count += n
-				}
-			}
-		case "ci.song.%d.json":
-			base := strings.TrimPrefix(name, "ci.song.")
-			base = strings.TrimSuffix(base, ".json")
-			if n, err := strconv.Atoi(base); err == nil {
-				count += n
-			}
-		default:
-			count++
-		}
-	}
-	return count
 }
