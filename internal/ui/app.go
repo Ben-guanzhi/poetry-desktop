@@ -432,12 +432,7 @@ func (ui *AppUI) makePoemList() *widget.List {
 			} else {
 				author.SetText("")
 			}
-			content := p.Content
-			if len(content) > 30 {
-				preview.SetText(content[:30] + "...")
-			} else {
-				preview.SetText(content)
-			}
+			preview.SetText(p.Preview(30))
 		},
 	)
 	list.OnSelected = func(id widget.ListItemID) {

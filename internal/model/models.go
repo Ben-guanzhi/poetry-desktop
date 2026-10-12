@@ -34,6 +34,21 @@ type Poem struct {
 	Type     string // "poem" or "text"
 }
 
+// Preview renders Content for a list row: at most n runes, followed by an
+// ellipsis when the poem was cut.
+//
+// The cut has to count runes, not bytes: Chinese is three bytes per character,
+// so a byte cut returns a third of the length that was meant and, worse,
+// lands inside a code point, which the text widget renders as a replacement
+// character.
+func (p *Poem) Preview(n int) string {
+	runes := []rune(p.Content)
+	if len(runes) <= n {
+		return p.Content
+	}
+	return string(runes[:n]) + "..."
+}
+
 type Dataset struct {
 	Name        string
 	Dir         string
