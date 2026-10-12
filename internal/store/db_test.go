@@ -26,6 +26,9 @@ func TestMigrateCreatesSchemaAndVersion(t *testing.T) {
 	if v != schemaVersion {
 		t.Fatalf("schema version = %d, want %d", v, schemaVersion)
 	}
+	if s.tableExists("authors") {
+		t.Fatal("authors table must not be created: it had no reader")
+	}
 }
 
 // The DSN must reach WAL: modernc.org/sqlite only honors "_pragma=" params
@@ -228,7 +231,7 @@ func TestMigratePreservesCollections(t *testing.T) {
 	if _, err := s.ToggleCollection("1"); err != nil {
 		t.Fatal(err)
 	}
-	// Force the old-schema rebuild: poems, authors and meta are re-downloadable,
+	// Force the old-schema rebuild: poems and meta are re-downloadable,
 	// collections is not.
 	if _, err := s.db.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1')`); err != nil {
 		t.Fatal(err)

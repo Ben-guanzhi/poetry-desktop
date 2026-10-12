@@ -336,8 +336,8 @@ func TestFTSQueryIsAlwaysParseable(t *testing.T) {
 
 // A database sitting on the v2 shape has the old unicode61 index. Opening it
 // must rebuild the index and leave a working Chinese search, without dropping
-// poems.
-func TestMigrateV2ToV3RebuildsTheIndex(t *testing.T) {
+// poems, and must drop the authors table on the way to the latest version.
+func TestMigrateV2RebuildsTheIndexAndDropsAuthors(t *testing.T) {
 	dir := t.TempDir()
 	if err := buildV2Database(filepath.Join(dir, "poetry.db")); err != nil {
 		t.Fatal(err)
@@ -363,6 +363,9 @@ func TestMigrateV2ToV3RebuildsTheIndex(t *testing.T) {
 	}
 	if n != 3 {
 		t.Fatalf("poems = %d after migration, want 3", n)
+	}
+	if s.tableExists("authors") {
+		t.Fatal("authors table survived migration to v4")
 	}
 
 	poems, err := s.SearchPoems(`黄河之水天上来`, 200, 0)

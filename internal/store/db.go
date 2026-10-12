@@ -43,8 +43,10 @@ func New(dataDir string) (*Store, error) {
 
 // schemaVersion is what a freshly migrated database reports in meta.
 // 2 introduced the poems/authors/meta tables; 3 rebuilt poems_fts (see
-// migrateFTSToTrigram) because the v2 index could not match Chinese text at all.
-const schemaVersion = 3
+// migrateFTSToTrigram) because the v2 index could not match Chinese text at all;
+// 4 dropped the authors table, whose only two readers were gone and whose rows
+// were pure corpus data (every poem already carries its own author column).
+const schemaVersion = 4
 
 func (s *Store) migrate() error {
 	version, err := s.getSchemaVersion()
@@ -56,8 +58,13 @@ func (s *Store) migrate() error {
 		// Old schema - need to migrate
 		return s.migrateFromOldSchema()
 	}
+	if version < 3 {
+		if err := s.migrateFTSToTrigram(); err != nil {
+			return err
+		}
+	}
 	if version < schemaVersion {
-		return s.migrateFTSToTrigram()
+		return s.migrateDropAuthors()
 	}
 	return nil
 }
@@ -74,7 +81,22 @@ func (s *Store) migrateFTSToTrigram() error {
 	if err := s.RebuildFTS(); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)`, schemaVersion)
+	return s.setSchemaVersion(3)
+}
+
+// migrateDropAuthors removes the authors table. It was imported from the corpus
+// but never read: its only two readers, ListAuthors and AuthorCount, were
+// deleted, and every poem already carries its own author column, so the table
+// held write-only rows. collections is the only user data and is untouched.
+func (s *Store) migrateDropAuthors() error {
+	if _, err := s.db.Exec(`DROP TABLE IF EXISTS authors`); err != nil {
+		return err
+	}
+	return s.setSchemaVersion(schemaVersion)
+}
+
+func (s *Store) setSchemaVersion(v int) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)`, v)
 	return err
 }
 
@@ -143,7 +165,6 @@ func (s *Store) migrateFromOldSchema() error {
 	dropStmts := []string{
 		`DROP TABLE IF EXISTS poems_fts`,
 		`DROP TABLE IF EXISTS poems`,
-		`DROP TABLE IF EXISTS authors`,
 		`DROP TABLE IF EXISTS collections`,
 		`DROP TABLE IF EXISTS meta`,
 	}
@@ -164,13 +185,6 @@ CREATE TABLE poems (
 	chapter TEXT,
 	section TEXT,
 	poem_type TEXT
-);
-
-CREATE TABLE authors (
-	id TEXT PRIMARY KEY,
-	name TEXT,
-	dynasty TEXT,
-	description TEXT
 );
 
 CREATE TABLE collections (
@@ -194,8 +208,6 @@ CREATE TABLE meta (
 		`CREATE INDEX idx_poems_author ON poems(author)`,
 		`CREATE INDEX idx_poems_title ON poems(title)`,
 		`CREATE INDEX idx_poems_chapter ON poems(chapter)`,
-		`CREATE INDEX idx_authors_dynasty ON authors(dynasty)`,
-		`CREATE INDEX idx_authors_name ON authors(name)`,
 	}
 	for _, stmt := range indexStmts {
 		_, _ = s.db.Exec(stmt)
@@ -229,17 +241,14 @@ CREATE TABLE meta (
 		}
 	}
 
-	// Set version: this path already builds the v3 FTS schema through
-	// createFTS, so a fresh database lands directly on the latest version.
-	_, err = s.db.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)`, schemaVersion)
-	return err
+	// Set version: this path already builds the v4 schema through createFTS,
+	// so a fresh database lands directly on the latest version.
+	return s.setSchemaVersion(schemaVersion)
 }
 
 func (s *Store) Close() error {
 	return s.db.Close()
 }
-
-func (s *Store) DataDir() string { return s.dataDir }
 
 func (s *Store) Begin() (*sql.Tx, error) {
 	return s.db.Begin()
@@ -257,25 +266,6 @@ func (s *Store) ImportPoems(tx *sql.Tx, poems []model.Poem) error {
 
 	for _, p := range poems {
 		_, err := stmt.Exec(p.ID, string(p.Dynasty), p.Author, p.Title, p.Rhythmic, p.Content, p.Tags, p.Chapter, p.Section, p.Type)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Store) ImportAuthors(tx *sql.Tx, authors []model.Author) error {
-	stmt, err := tx.Prepare(`
-		INSERT OR IGNORE INTO authors (id, name, dynasty, description)
-		VALUES (?, ?, ?, ?)
-	`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, a := range authors {
-		_, err := stmt.Exec(a.ID, a.Name, string(a.Dynasty), a.Desc)
 		if err != nil {
 			return err
 		}
@@ -363,63 +353,6 @@ func (s *Store) PoemCount(dynasty model.Dynasty) (int, error) {
 	var n int
 	err := s.db.QueryRow(query, args...).Scan(&n)
 	return n, err
-}
-
-func (s *Store) AuthorCount(dynasty model.Dynasty) (int, error) {
-	var query string
-	var args []any
-	if dynasty == "" {
-		query = `SELECT COUNT(DISTINCT author) FROM poems`
-	} else {
-		query = `SELECT COUNT(DISTINCT author) FROM poems WHERE dynasty = ?`
-		args = append(args, string(dynasty))
-	}
-	var n int
-	err := s.db.QueryRow(query, args...).Scan(&n)
-	return n, err
-}
-
-func (s *Store) ListDynasties() ([]model.Dynasty, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT dynasty FROM poems ORDER BY dynasty`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var res []model.Dynasty
-	for rows.Next() {
-		var d string
-		if err := rows.Scan(&d); err != nil {
-			return nil, err
-		}
-		res = append(res, model.Dynasty(d))
-	}
-	return res, rows.Err()
-}
-
-func (s *Store) ListAuthors(dynasty model.Dynasty, limit, offset int) ([]model.Author, error) {
-	var query string
-	var args []any
-	if dynasty == "" {
-		query = `SELECT id, name, dynasty, description FROM authors ORDER BY name LIMIT ? OFFSET ?`
-		args = append(args, limit, offset)
-	} else {
-		query = `SELECT id, name, dynasty, description FROM authors WHERE dynasty = ? ORDER BY name LIMIT ? OFFSET ?`
-		args = append(args, string(dynasty), limit, offset)
-	}
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var res []model.Author
-	for rows.Next() {
-		var a model.Author
-		if err := rows.Scan(&a.ID, &a.Name, &a.Dynasty, &a.Desc); err != nil {
-			return nil, err
-		}
-		res = append(res, a)
-	}
-	return res, rows.Err()
 }
 
 func (s *Store) ListAuthorsFromPoems(dynasty model.Dynasty, limit, offset int) ([]string, error) {
@@ -617,20 +550,6 @@ func (s *Store) searchLike(q string, limit, offset int) ([]model.Poem, error) {
 	}
 	defer rows.Close()
 	return scanPoems(rows)
-}
-
-func (s *Store) GetPoem(id string) (*model.Poem, error) {
-	var p model.Poem
-	err := s.db.QueryRow(`
-		SELECT id, dynasty, author, title, rhythmic, content, tags, chapter, section, poem_type FROM poems WHERE id = ?
-	`, id).Scan(&p.ID, &p.Dynasty, &p.Author, &p.Title, &p.Rhythmic, &p.Content, &p.Tags, &p.Chapter, &p.Section, &p.Type)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &p, nil
 }
 
 // Order-by-rowid random selection: ORDER BY RANDOM() scans and sorts the

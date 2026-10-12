@@ -14,13 +14,6 @@ const (
 	DynastyNone    Dynasty = ""
 )
 
-type Author struct {
-	ID      string
-	Name    string
-	Dynasty Dynasty
-	Desc    string
-}
-
 type Poem struct {
 	ID       string
 	Dynasty  Dynasty
@@ -50,11 +43,13 @@ func (p *Poem) Preview(n int) string {
 }
 
 type Dataset struct {
-	Name        string
-	Dir         string
-	Dynasty     Dynasty
-	Type        string // "poem", "ci", "text", "classic"
-	HasAuthors  bool
+	Name    string
+	Dir     string
+	Dynasty Dynasty
+	Type    string // "poem", "ci", "text", "classic"
+	// AuthorFile names the one non-poem payload in the directory. It must be
+	// skipped when listing poem files, or a re-run would parse it as poems.
+	// The authors table it once fed was dropped at schema v4.
 	AuthorFile  string
 	PoemFiles   []string
 	PoemPattern string
@@ -70,7 +65,6 @@ var Datasets = []Dataset{
 		Dir:         "全唐诗",
 		Dynasty:     DynastyTang,
 		Type:        "poem",
-		HasAuthors:  true,
 		AuthorFile:  "authors.tang.json",
 		PoemPattern: "poet.tang.%d.json",
 		Count:       58000,
@@ -80,7 +74,6 @@ var Datasets = []Dataset{
 		Dir:         "全宋诗",
 		Dynasty:     DynastySong,
 		Type:        "poem",
-		HasAuthors:  true,
 		AuthorFile:  "authors.song.json",
 		PoemPattern: "poet.song.%d.json",
 		Count:       255000,
@@ -90,7 +83,6 @@ var Datasets = []Dataset{
 		Dir:         "宋词",
 		Dynasty:     DynastySong,
 		Type:        "ci",
-		HasAuthors:  true,
 		AuthorFile:  "author.song.json",
 		PoemPattern: "ci.song.%d.json",
 		Count:       22000,

@@ -49,19 +49,6 @@ func (d *Downloader) DownloadAndImport(ds model.Dataset) error {
 		return err
 	}
 
-	// Download authors if needed
-	if ds.HasAuthors && ds.AuthorFile != "" {
-		d.report(ds.Name, ds.AuthorFile, 0, 1, "下载作者信息...")
-		if data, err := d.downloadFile(ds.Dir, ds.AuthorFile); err != nil {
-			d.report(ds.Name, ds.AuthorFile, 1, 1, "下载失败: "+err.Error())
-		} else {
-			d.report(ds.Name, ds.AuthorFile, 1, 1, "导入作者信息...")
-			if err := d.importAuthors(ds, data); err != nil {
-				d.report(ds.Name, ds.AuthorFile, 1, 1, "导入失败: "+err.Error())
-			}
-		}
-	}
-
 	// Build file list
 	files := ds.PoemFiles
 	if len(files) == 0 && ds.PoemPattern != "" {
@@ -171,6 +158,7 @@ func (d *Downloader) localFiles(ds model.Dataset) []string {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
+		// ds.AuthorFile is the directory's one non-poem payload.
 		if e.Name() == ds.AuthorFile {
 			continue
 		}
@@ -281,55 +269,6 @@ func readPayload(path string) ([]byte, error) {
 func (d *Downloader) validPayload(path string) bool {
 	_, err := readPayload(path)
 	return err == nil
-}
-
-func (d *Downloader) importAuthors(ds model.Dataset, data []byte) error {
-	tx, err := d.store.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	switch ds.Dir {
-	case "全唐诗":
-		var raw []tangAuthor
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return err
-		}
-		authors := make([]model.Author, 0, len(raw))
-		for _, r := range raw {
-			authors = append(authors, model.Author{ID: r.ID, Name: r.Name, Dynasty: model.DynastyTang, Desc: r.Desc})
-		}
-		if err := d.store.ImportAuthors(tx, authors); err != nil {
-			return err
-		}
-	case "全宋诗":
-		var raw []tangAuthor
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return err
-		}
-		authors := make([]model.Author, 0, len(raw))
-		for _, r := range raw {
-			authors = append(authors, model.Author{ID: r.ID, Name: r.Name, Dynasty: model.DynastySong, Desc: r.Desc})
-		}
-		if err := d.store.ImportAuthors(tx, authors); err != nil {
-			return err
-		}
-	case "宋词":
-		var raw []songCiAuthor
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return err
-		}
-		authors := make([]model.Author, 0, len(raw))
-		for _, r := range raw {
-			authors = append(authors, model.Author{ID: r.Name, Name: r.Name, Dynasty: model.DynastySong, Desc: r.Description})
-		}
-		if err := d.store.ImportAuthors(tx, authors); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
 }
 
 func (d *Downloader) importPoems(ds model.Dataset, filename string, data []byte) error {
@@ -528,21 +467,9 @@ func (d *Downloader) report(dataset, file string, current, total int, msg string
 
 // ---------- JSON structs ----------
 //
-// Only the author files get a shape of their own. Poems are read as
-// map[string]any and normalised in normalisePoem, so no per-dynasty poem
-// struct is needed here.
-
-type tangAuthor struct {
-	Desc string `json:"desc"`
-	Name string `json:"name"`
-	ID   string `json:"id"`
-}
-
-type songCiAuthor struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Dynasty     string `json:"dynasty"`
-}
+// Poem payloads are read as map[string]any and normalised in normalisePoem, so
+// no per-dynasty poem struct is needed. The author-file shapes went away with
+// the authors table (schema v4).
 
 func urlEncode(s string) string {
 	return url.PathEscape(s)
