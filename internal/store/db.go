@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,7 +81,41 @@ func (s *Store) getSchemaVersion() (int, error) {
 	return v, nil
 }
 
+func (s *Store) tableExists(name string) bool {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name,
+	).Scan(&n)
+	return err == nil && n > 0
+}
+
 func (s *Store) migrateFromOldSchema() error {
+	// Read favorites first: collections is user data, everything else is
+	// re-downloadable corpus, so a rebuild from the old schema must not wipe
+	// the ones the user saved by hand. Their poems are rebuilt empty at this
+	// point, so the rows read as empty until the corpus is downloaded again —
+	// ListCollections joins back on poems.id and does not show them meanwhile.
+	var favorites []string
+	if s.tableExists("collections") {
+		rows, err := s.db.Query(`SELECT poem_id FROM collections`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			favorites = append(favorites, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+
 	// Drop and recreate all tables for a clean start
 	dropStmts := []string{
 		`DROP TABLE IF EXISTS poems_fts`,
@@ -155,6 +190,30 @@ CREATE TABLE meta (
 	`)
 	if err != nil {
 		return err
+	}
+
+	// Play the favorites back into the rebuilt table (poem_id is the primary
+	// key, so a duplicate cannot be introduced).
+	if len(favorites) > 0 {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		stmt, err := tx.Prepare(`INSERT OR IGNORE INTO collections (poem_id) VALUES (?)`)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		defer stmt.Close()
+		for _, id := range favorites {
+			if _, err := stmt.Exec(id); err != nil {
+				tx.Rollback()
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 
 	// Set version
@@ -452,10 +511,11 @@ func (s *Store) GetPoem(id string) (*model.Poem, error) {
 }
 
 // Order-by-rowid random selection: ORDER BY RANDOM() scans and sorts the
-// whole candidate set every call (255k rows for RandomPoem); instead each
-// query below picks a random rowid in [1, MAX(rowid)] and index-seeks to the
-// first row at or above it. Rowid is implicit (poems has a TEXT primary key,
-// no WITHOUT ROWID), so the seek is O(log n) via the rowid b-tree.
+// whole candidate set every call (255k rows for RandomPoem); instead the
+// unfiltered query picks a random rowid in [1, MAX(rowid)] and index-seeks to
+// the first row at or above it. Rowid is implicit (poems has a TEXT primary
+// key, no WITHOUT ROWID), so the seek is O(log n) via the rowid b-tree.
+// Filtered variants must not reuse this trick — see randomPoemWhere.
 //
 // ABS(RANDOM() % n) is used (not ABS(RANDOM())) because RANDOM() returns a
 // 64-bit signed int and ABS of the minimum value overflows; modulo a small n
@@ -480,34 +540,45 @@ func (s *Store) RandomPoem() (*model.Poem, error) {
 }
 
 func (s *Store) RandomPoemByDynasty(dynasty model.Dynasty) (*model.Poem, error) {
-	var p model.Poem
-	err := s.db.QueryRow(`
-		SELECT id, dynasty, author, title, rhythmic, content, tags, chapter, section, poem_type FROM poems
-		WHERE dynasty = ?
-		AND rowid >= (
-			SELECT 1 + ABS(RANDOM() % MAX(1, (SELECT COALESCE(MAX(rowid),0) FROM poems WHERE dynasty = ?)))
-		)
-		ORDER BY rowid LIMIT 1
-	`, string(dynasty), string(dynasty)).Scan(&p.ID, &p.Dynasty, &p.Author, &p.Title, &p.Rhythmic, &p.Content, &p.Tags, &p.Chapter, &p.Section, &p.Type)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &p, nil
+	return s.randomPoemWhere(`dynasty = ?`, string(dynasty))
 }
 
 func (s *Store) RandomPoemByType(pType string) (*model.Poem, error) {
+	return s.randomPoemWhere(`poem_type = ?`, pType)
+}
+
+// randomPoemWhere draws one row uniformly at random from a filtered candidate
+// set.
+//
+// A random rowid is not a random row. P(row i) = (rowid[i+1]-rowid[i]) / MAX,
+// so the wider the gap before a row, the more often it is drawn. For the full
+// table that gap is ~1 everywhere (imports append, and poems is only ever
+// wiped wholesale, never pruned row by row), which is why RandomPoem keeps the
+// cheap index seek. A filtered subset is different: its rowids sit in the
+// contiguous block that dataset was imported in, so a uniform r in
+// [1, MAX(rowid)] lands in the pre-subset gap and the subset's first row is
+// drawn up to hundreds of times more often than its last.
+//
+// Counting the candidates and taking a uniform offset over the count domain
+// fixes it: ORDER BY rowid is a fixed total order, so OFFSET k is an exact
+// uniform draw. Subsets are thousands of rows, not 255k, so the extra count
+// plus offset scan is negligible for a "random poem" button.
+func (s *Store) randomPoemWhere(where string, args ...any) (*model.Poem, error) {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM poems WHERE `+where, args...).Scan(&n); err != nil {
+		return nil, err
+	}
+	if n <= 0 {
+		return nil, nil
+	}
+
 	var p model.Poem
 	err := s.db.QueryRow(`
 		SELECT id, dynasty, author, title, rhythmic, content, tags, chapter, section, poem_type FROM poems
-		WHERE poem_type = ?
-		AND rowid >= (
-			SELECT 1 + ABS(RANDOM() % MAX(1, (SELECT COALESCE(MAX(rowid),0) FROM poems WHERE poem_type = ?)))
-		)
-		ORDER BY rowid LIMIT 1
-	`, pType, pType).Scan(&p.ID, &p.Dynasty, &p.Author, &p.Title, &p.Rhythmic, &p.Content, &p.Tags, &p.Chapter, &p.Section, &p.Type)
+		WHERE `+where+`
+		ORDER BY rowid LIMIT 1 OFFSET ?`,
+		append(append([]any{}, args...), rand.Intn(n))...).
+		Scan(&p.ID, &p.Dynasty, &p.Author, &p.Title, &p.Rhythmic, &p.Content, &p.Tags, &p.Chapter, &p.Section, &p.Type)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
