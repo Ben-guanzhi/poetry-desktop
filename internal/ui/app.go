@@ -832,9 +832,12 @@ func (ui *AppUI) loadSettings() {
 	count, _ := ui.store.PoemCount("")
 	items = append(items, widget.NewLabel(fmt.Sprintf("本地诗词总数: %d", count)))
 
+	// One grouped pass over every dataset count instead of 18 prefix COUNT
+	// scans: the settings page opens with this loop on every visit.
+	datasetCounts, _ := ui.store.PoemCountsAllDatasets()
 	for _, ds := range model.Datasets {
 		ds := ds
-		dsCount, _ := ui.store.PoemCountByDataset(ds.Dir)
+		dsCount := datasetCounts[ds.Dir]
 		action := "下载"
 		if ds.AutoDir {
 			action = "导入"

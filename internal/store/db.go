@@ -254,23 +254,35 @@ func (s *Store) Begin() (*sql.Tx, error) {
 	return s.db.Begin()
 }
 
-func (s *Store) ImportPoems(tx *sql.Tx, poems []model.Poem) error {
+// ImportPoems inserts poems in one prepared batch and reports how many rows
+// actually landed. INSERT OR IGNORE answers 0 for rows the corpus already has,
+// so the count is how the callers tell a real import from a no-op re-run
+// without scanning the table again.
+func (s *Store) ImportPoems(tx *sql.Tx, poems []model.Poem) (int, error) {
 	stmt, err := tx.Prepare(`
 		INSERT OR IGNORE INTO poems (id, dynasty, author, title, rhythmic, content, tags, chapter, section, poem_type)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer stmt.Close()
 
+	inserted := 0
 	for _, p := range poems {
-		_, err := stmt.Exec(p.ID, string(p.Dynasty), p.Author, p.Title, p.Rhythmic, p.Content, p.Tags, p.Chapter, p.Section, p.Type)
+		res, err := stmt.Exec(p.ID, string(p.Dynasty), p.Author, p.Title, p.Rhythmic, p.Content, p.Tags, p.Chapter, p.Section, p.Type)
 		if err != nil {
-			return err
+			return inserted, err
+		}
+		// A driver that cannot answer RowsAffected reports -1/0 here; treating
+		// "unknown" as "inserted" keeps the caller's rebuild gate conservative:
+		// it rebuilds rather than silently skipping.
+		n, err := res.RowsAffected()
+		if err != nil || n != 0 {
+			inserted++
 		}
 	}
-	return nil
+	return inserted, nil
 }
 
 // createFTS builds the search index plus the triggers that keep it honest.
@@ -463,6 +475,39 @@ func (s *Store) PoemCountByDataset(dir string) (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM poems WHERE id LIKE ?`, dir+"-%").Scan(&n)
 	return n, err
+}
+
+// PoemCountsAllDatasets answers "how many poems per dataset dir" for every
+// dir in one grouped pass over the table.
+//
+// This exists because the settings page asks it for all 18 datasets on every
+// open. Calling PoemCountByDataset per dataset is 18 COUNT scans that LIKE
+// cannot serve from an index (the pattern is a prefix but the scan still
+// walks), which at a 50k corpus costs ~4x the single grouped query.
+//
+// The grouping key is the id up to the first '-', which is exactly how the
+// importers build ids ("<dir>-<file>-<n>", model.Dataset.Dir never contains a
+// dash): a key equals a dataset's Dir iff that dataset's PoemCountByDataset
+// LIKE 'dir-%' counts those rows. Ids without a dash (none in this corpus)
+// collect under the empty key, which no dataset looks up.
+func (s *Store) PoemCountsAllDatasets() (map[string]int, error) {
+	rows, err := s.db.Query(`
+		SELECT substr(id, 1, instr(id, '-') - 1), COUNT(*) FROM poems GROUP BY 1
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var dir string
+		var n int
+		if err := rows.Scan(&dir, &n); err != nil {
+			return nil, err
+		}
+		counts[dir] = n
+	}
+	return counts, rows.Err()
 }
 
 // SearchPoems searches the corpus for q, using the FTS5 index when it can

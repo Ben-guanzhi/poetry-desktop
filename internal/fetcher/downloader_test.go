@@ -150,8 +150,12 @@ func TestImportPoemsReadsTheFileOnlyOnce(t *testing.T) {
 	}
 
 	d := New(dir, s, nil)
-	if err := d.importPoems(model.Dataset{Dir: "test", Type: "poem", Dynasty: model.DynastyTang}, "poet.0.json", data); err != nil {
+	n, err := d.importPoems(model.Dataset{Dir: "test", Type: "poem", Dynasty: model.DynastyTang}, "poet.0.json", data)
+	if err != nil {
 		t.Fatalf("importPoems without the file on disk: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("importPoems reported %d inserted, want 1", n)
 	}
 	poems, err := s.SearchPoems("静夜思", 10, 0)
 	if err != nil {

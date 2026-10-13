@@ -32,10 +32,29 @@ type Downloader struct {
 	dataDir    string
 	store      *store.Store
 	onProgress func(Progress)
+	// rebuild resyncs the FTS index. It is a field, not a direct call, so
+	// tests can observe whether the gate below actually fires; production
+	// wiring is store.RebuildFTS.
+	rebuild func() error
 }
 
 func New(dataDir string, s *store.Store, onProgress func(Progress)) *Downloader {
-	return &Downloader{dataDir: dataDir, store: s, onProgress: onProgress}
+	return &Downloader{dataDir: dataDir, store: s, onProgress: onProgress, rebuild: s.RebuildFTS}
+}
+
+// rebuildFTS runs the full-index resync unless this run inserted zero rows.
+//
+// The resync is Θ(entire poems table) and the AFTER INSERT trigger has already
+// indexed every row this run added (TestFTSTriggersKeepTheIndexInSync pins
+// that), so on an unchanged re-run it repairs nothing and only costs a corpus
+// sweep: at 50k rows that is multiple seconds per dataset, 18 times per
+// "下载全部". It still runs after any run that changed the table, so it keeps
+// its repair-and-final-check role wherever drift could have been introduced.
+func (d *Downloader) rebuildFTS(inserted int) error {
+	if inserted == 0 {
+		return nil
+	}
+	return d.rebuild()
 }
 
 func (d *Downloader) DownloadAndImport(ds model.Dataset) error {
@@ -55,6 +74,7 @@ func (d *Downloader) DownloadAndImport(ds model.Dataset) error {
 		files = d.discoverFiles(ds)
 	}
 
+	inserted := 0
 	for i, f := range files {
 		d.report(ds.Name, f, i, len(files), "下载...")
 		data, err := d.downloadFile(ds.Dir, f)
@@ -63,13 +83,18 @@ func (d *Downloader) DownloadAndImport(ds model.Dataset) error {
 			continue
 		}
 		d.report(ds.Name, f, i+1, len(files), "导入...")
-		if err := d.importPoems(ds, f, data); err != nil {
+		n, err := d.importPoems(ds, f, data)
+		if err != nil {
 			d.report(ds.Name, f, i+1, len(files), "导入失败: "+err.Error())
+			continue
 		}
+		inserted += n
 	}
 
-	d.report(ds.Name, "", len(files), len(files), "重建索引...")
-	return d.store.RebuildFTS()
+	if inserted > 0 {
+		d.report(ds.Name, "", len(files), len(files), "重建索引...")
+	}
+	return d.rebuildFTS(inserted)
 }
 
 // importLocalDataset imports every *.json in a local directory (no download).
@@ -94,6 +119,7 @@ func (d *Downloader) importLocalDataset(ds model.Dataset, dir string) error {
 	}
 
 	imported := 0
+	inserted := 0
 	for i, f := range files {
 		d.report(ds.Name, f, i, len(files), "导入...")
 		data, err := readPayload(filepath.Join(dir, f))
@@ -101,15 +127,21 @@ func (d *Downloader) importLocalDataset(ds model.Dataset, dir string) error {
 			d.report(ds.Name, f, i+1, len(files), "导入失败: "+err.Error())
 			continue
 		}
-		if err := d.importPoems(ds, f, data); err != nil {
+		n, err := d.importPoems(ds, f, data)
+		if err != nil {
 			d.report(ds.Name, f, i+1, len(files), "导入失败: "+err.Error())
 			continue
 		}
 		imported++
+		inserted += n
 	}
 
-	d.report(ds.Name, "", len(files), len(files), fmt.Sprintf("已导入 %d/%d 个文件，重建索引...", imported, len(files)))
-	return d.store.RebuildFTS()
+	if inserted > 0 {
+		d.report(ds.Name, "", len(files), len(files), fmt.Sprintf("已导入 %d/%d 个文件，重建索引...", imported, len(files)))
+	} else {
+		d.report(ds.Name, "", len(files), len(files), fmt.Sprintf("已导入 %d/%d 个文件（无新增诗词）", imported, len(files)))
+	}
+	return d.rebuildFTS(inserted)
 }
 
 func (d *Downloader) discoverFiles(ds model.Dataset) []string {
@@ -271,10 +303,12 @@ func (d *Downloader) validPayload(path string) bool {
 	return err == nil
 }
 
-func (d *Downloader) importPoems(ds model.Dataset, filename string, data []byte) error {
+// importPoems parses one payload and writes it in a single transaction,
+// reporting how many rows were actually inserted (0 for a full re-run).
+func (d *Downloader) importPoems(ds model.Dataset, filename string, data []byte) (int, error) {
 	tx, err := d.store.Begin()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
 
@@ -290,14 +324,18 @@ func (d *Downloader) importPoems(ds model.Dataset, filename string, data []byte)
 		poems, err = d.parsePoemFormat(ds, filename, data)
 	}
 	if err != nil {
-		return err
+		return 0, err
 	}
+	inserted := 0
 	if len(poems) > 0 {
-		if err := d.store.ImportPoems(tx, poems); err != nil {
-			return err
+		if inserted, err = d.store.ImportPoems(tx, poems); err != nil {
+			return 0, err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return inserted, nil
 }
 
 // ---------- Format parsers ----------

@@ -14,7 +14,7 @@ func importPoems(t *testing.T, s *Store, poems []model.Poem) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ImportPoems(tx, poems); err != nil {
+	if _, err := s.ImportPoems(tx, poems); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {

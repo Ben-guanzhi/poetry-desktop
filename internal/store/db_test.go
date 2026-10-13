@@ -80,7 +80,7 @@ func TestRandomPoemReturnsImportedPoem(t *testing.T) {
 		{ID: "2", Dynasty: model.DynastyTang, Author: "A", Title: "T2", Content: "c2"},
 		{ID: "3", Dynasty: model.DynastyTang, Author: "A", Title: "T3", Content: "c3"},
 	}
-	if err := s.ImportPoems(tx, poems); err != nil {
+	if _, err := s.ImportPoems(tx, poems); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -111,7 +111,7 @@ func TestRandomPoemByDynasty(t *testing.T) {
 	defer close()
 
 	tx, _ := s.Begin()
-	if err := s.ImportPoems(tx, []model.Poem{
+	if _, err := s.ImportPoems(tx, []model.Poem{
 		{ID: "s1", Dynasty: model.DynastySong, Title: "S1", Content: "s1"},
 		{ID: "t1", Dynasty: model.DynastyTang, Title: "T1", Content: "t1"},
 	}); err != nil {
@@ -155,7 +155,7 @@ func TestRandomPoemByTypeIsUniformOverTheSubset(t *testing.T) {
 		{ID: "ci3", Dynasty: model.DynastySong, Title: "C3", Type: "ci"},
 		{ID: "ci4", Dynasty: model.DynastySong, Title: "C4", Type: "ci"},
 	}
-	if err := s.ImportPoems(tx, poems); err != nil {
+	if _, err := s.ImportPoems(tx, poems); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -220,7 +220,7 @@ func TestMigratePreservesCollections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ImportPoems(tx, []model.Poem{
+	if _, err := s.ImportPoems(tx, []model.Poem{
 		{ID: "1", Dynasty: model.DynastyTang, Author: "A", Title: "T1", Content: "c1"},
 	}); err != nil {
 		t.Fatal(err)
