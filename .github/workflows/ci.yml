@@ -28,7 +28,18 @@ jobs:
           fi
 
       - name: vet
-        run: go vet ./...
+        # Surfaces the vet finding as an annotation so the failure is readable
+        # without being able to open the raw job logs.
+        run: |
+          set +e
+          out=$(go vet ./... 2>&1)
+          rc=$?
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            detail=$(printf '%s' "$out" | head -40 | tr '\n' ' ' | head -c 1500)
+            echo "::error title=go vet rc=$rc::[$detail]"
+          fi
+          exit "$rc"
 
       - name: build
         run: go build ./...
