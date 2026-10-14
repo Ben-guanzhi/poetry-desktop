@@ -1,0 +1,9 @@
+# Force LF on both commit and checkout.
+#
+# core.autocrlf=false here today, but this pins the intent in-repo so a
+# future core.autocrlf=true cannot reintroduce CRLF in the index or produce
+# phantom diffs.
+#
+# `text=auto` (not `text`) so tracked binaries are content-sniffed and never
+# have their bytes normalised.
+* text=auto eol=lf
