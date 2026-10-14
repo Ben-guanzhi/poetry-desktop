@@ -17,9 +17,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Install Fyne dependencies
-        run: |
-          sudo apt-get update && sudo apt-get install -y \
-            gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev
+        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev
 
       - name: gofmt
         run: |
@@ -30,14 +28,21 @@ jobs:
           fi
 
       - name: vet
-        # Surfaces the vet finding as annotations so the failure is readable
-        # without being able to open the raw job logs. The API truncates each
-        # annotation message at ~512 bytes, so one message per offending line is
-        # used instead of a single concatenated message -- a single message let
-        # the "go: downloading" progress lines eat the budget and hide the error.
+        # -tags x11 is required, not cosmetic: go-gl/glfw's c_glfw_lin_x11.go and
+        # c_glfw_lin_wayland.go are both built when no x11/wayland tag is set (their
+        # constraint is `linux && !x11 && !wayland`), so the default Linux build
+        # compiles GLFW's Wayland sources too and fails with
+        #   ./glfw/src/wl_platform.h:27: fatal error: wayland-client-core.h: No such file
+        # x11 keeps us on the path xorg-dev already provides, so no libwayland-dev.
+        #
+        # The finding is surfaced as annotations so it is readable without access to
+        # the raw job logs. The API truncates each annotation message at ~512 bytes,
+        # so one message per offending line is used instead of one concatenated
+        # message -- a single message let the "go: downloading" progress lines eat
+        # the budget and hide the error.
         run: |
           set +e
-          go vet ./... >vet.log 2>&1
+          go vet -tags x11 ./... >vet.log 2>&1
           rc=$?
           set -e
           cat vet.log
@@ -52,7 +57,7 @@ jobs:
           exit "$rc"
 
       - name: build
-        run: go build ./...
+        run: go build -tags x11 ./...
 
       - name: test
-        run: go test -count=1 ./...
+        run: go test -count=1 -tags x11 ./...
