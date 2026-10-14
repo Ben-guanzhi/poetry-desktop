@@ -17,7 +17,9 @@ jobs:
           go-version-file: go.mod
 
       - name: Install Fyne dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev
 
       - name: gofmt
         run: |
@@ -28,16 +30,24 @@ jobs:
           fi
 
       - name: vet
-        # Surfaces the vet finding as an annotation so the failure is readable
-        # without being able to open the raw job logs.
+        # Surfaces the vet finding as annotations so the failure is readable
+        # without being able to open the raw job logs. The API truncates each
+        # annotation message at ~512 bytes, so one message per offending line is
+        # used instead of a single concatenated message -- a single message let
+        # the "go: downloading" progress lines eat the budget and hide the error.
         run: |
           set +e
-          out=$(go vet ./... 2>&1)
+          go vet ./... >vet.log 2>&1
           rc=$?
-          echo "$out"
+          set -e
+          cat vet.log
           if [ "$rc" -ne 0 ]; then
-            detail=$(printf '%s' "$out" | head -40 | tr '\n' ' ' | head -c 1500)
-            echo "::error title=go vet rc=$rc::[$detail]"
+            n=0
+            grep -viE '^go: downloading ' vet.log | grep -viE '^[[:space:]]*$' | while IFS= read -r line; do
+              n=$((n + 1))
+              [ "$n" -gt 15 ] && break
+              echo "::error title=go vet rc=$rc [$n]::$(printf '%s' "$line" | tr '\t' ' ' | head -c 450)"
+            done
           fi
           exit "$rc"
 
