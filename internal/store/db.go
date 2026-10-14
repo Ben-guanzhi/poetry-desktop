@@ -712,6 +712,14 @@ func (s *Store) ListCollections(limit, offset int) ([]model.Poem, error) {
 	return scanPoems(rows)
 }
 
+// ClearAllCollections removes all collections without touching poems.
+// The FTS index needs no separate wipe: the AFTER DELETE trigger clears
+// entries as each collection is removed, and collections has no FTS index.
+func (s *Store) ClearAllCollections() error {
+	_, err := s.db.Exec(`DELETE FROM collections`)
+	return err
+}
+
 // ClearAllPoems removes all poems and collections. The FTS index needs no
 // separate wipe: the AFTER DELETE trigger clears an entry as each poem goes,
 // and deleting poems_fts first would make that trigger's 'delete' command fail

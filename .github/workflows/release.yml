@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            os: ubuntu-latest
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            os: ubuntu-latest
+            ext: ""
+          - goos: darwin
+            goarch: amd64
+            os: macos-14
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            os: macos-14
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            os: windows-latest
+            ext: ".exe"
+          - goos: windows
+            goarch: arm64
+            os: windows-latest
+            ext: ".exe"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install Fyne dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+        run: |
+          go build -trimpath \
+            -ldflags "-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" \
+            -o "dist/poetry-desktop-${{ steps.version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" \
+            .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: poetry-desktop-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+
+  sign-and-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Flatten artifacts
+        run: |
+          find dist -type f -exec mv {} dist/ \;
+          rmdir dist/*/ 2>/dev/null || true
+
+      - name: Create checksums
+        run: sha256sum dist/* > dist/checksums.txt
+
+      - name: Sign checksums
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "$GPG_PASSPHRASE" | gpg --batch --pinentry-mode loopback --detach-sign --armor --output dist/checksums.txt.asc dist/checksums.txt
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v3
+        with:
+          output: dist/sbom.spdx.json
+          format: spdx-json
+          artifact-type: project
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: poetry-desktop ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -105,7 +105,7 @@ var Datasets = []Dataset{
 	},
 	{
 		Name:      "花间集",
-		Dir:       "五代诗词",
+		Dir:       "花间集",
 		Dynasty:   DynastyFive,
 		Type:      "ci",
 		PoemFiles: []string{"huajianji.json"},
@@ -113,7 +113,7 @@ var Datasets = []Dataset{
 	},
 	{
 		Name:      "南唐二主词",
-		Dir:       "五代诗词",
+		Dir:       "南唐二主词",
 		Dynasty:   DynastyFive,
 		Type:      "ci",
 		PoemFiles: []string{"nantang.json"},

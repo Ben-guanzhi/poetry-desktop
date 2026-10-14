@@ -39,6 +39,13 @@ type AppUI struct {
 
 	fontSize  int
 	themeName string
+	version   string
+}
+
+// logError writes a store/IO error to stderr. Desktop apps have no console,
+// so this is the only persistent record; user-facing errors use ShowError.
+func (ui *AppUI) logError(ctx string, err error) {
+	fmt.Fprintf(os.Stderr, "[error] %s: %v\n", ctx, err)
 }
 
 var favIcon = fyne.NewStaticResource("star", []byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="black" d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>`))
@@ -136,7 +143,7 @@ const (
 	exportLimit     = 10000 // 导出用：接近全量
 )
 
-func NewAppUI(a fyne.App, w fyne.Window, dataDir string) *AppUI {
+func NewAppUI(a fyne.App, w fyne.Window, dataDir, version string) *AppUI {
 	s, err := store.New(dataDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open store: %v\n", err)
@@ -150,6 +157,7 @@ func NewAppUI(a fyne.App, w fyne.Window, dataDir string) *AppUI {
 		dataDir:   dataDir,
 		fontSize:  s.GetFontSize(),
 		themeName: s.GetTheme(),
+		version:   version,
 	}
 	ui.applyTheme()
 	ui.buildUI()
@@ -172,7 +180,9 @@ func (ui *AppUI) toggleTheme() {
 		ui.themeName = "light"
 	}
 	ui.applyTheme()
-	_ = ui.store.SetTheme(ui.themeName)
+	if err := ui.store.SetTheme(ui.themeName); err != nil {
+		ui.logError("SetTheme", err)
+	}
 	ui.refreshCurrentView()
 }
 
@@ -236,7 +246,6 @@ func (ui *AppUI) buildUI() {
 	ui.searchEntry = widget.NewEntry()
 	ui.searchEntry.SetPlaceHolder("搜索诗词、作者...")
 	ui.searchEntry.OnSubmitted = func(q string) {
-		ui.navigateTo(navIndex("维基文库"))
 		ui.performSearch(q)
 	}
 
@@ -249,7 +258,6 @@ func (ui *AppUI) buildUI() {
 	})
 
 	searchBtn := widget.NewButtonWithIcon("", theme.SearchIcon(), func() {
-		ui.navigateTo(navIndex("维基文库"))
 		ui.performSearch(ui.searchEntry.Text)
 	})
 
@@ -307,11 +315,17 @@ func (ui *AppUI) loadDatasetByName(name string) {
 func (ui *AppUI) loadBrowse(dynasty model.Dynasty) {
 	ui.selectedDynasty = dynasty
 	ui.listRebuild = func() { ui.loadBrowse(dynasty) }
-	poems, _ := ui.store.ListPoemsByDynasty(dynasty, browsePageSize, 0)
+	poems, err := ui.store.ListPoemsByDynasty(dynasty, browsePageSize, 0)
+	if err != nil {
+		ui.logError("ListPoemsByDynasty", err)
+	}
 	ui.poems = poems
 	list := ui.makePoemList()
 
-	total, _ := ui.store.PoemCount(dynasty)
+	total, err := ui.store.PoemCount(dynasty)
+	if err != nil {
+		ui.logError("PoemCount", err)
+	}
 	label := widget.NewLabel(fmt.Sprintf("%s 诗词 · 共 %d 首", dynasty, total))
 	label.TextStyle = fyne.TextStyle{Bold: true}
 	ui.setContent(container.NewBorder(label, nil, nil, nil, list))
@@ -321,7 +335,10 @@ func (ui *AppUI) loadBrowseByDataset(ds model.Dataset) {
 	ui.selectedDynasty = ds.Dynasty
 	ui.listRebuild = func() { ui.loadBrowseByDataset(ds) }
 
-	poems, _ := ui.store.ListPoemsByDataset(ds.Dir, datasetPageSize, 0)
+	poems, err := ui.store.ListPoemsByDataset(ds.Dir, datasetPageSize, 0)
+	if err != nil {
+		ui.logError("ListPoemsByDataset", err)
+	}
 	ui.poems = poems
 	list := ui.makePoemList()
 
@@ -358,7 +375,10 @@ func (ui *AppUI) loadBrowseByDataset(ds model.Dataset) {
 // output groups chapters under a book name).
 func (ui *AppUI) loadBookList(ds model.Dataset) {
 	ui.listRebuild = func() { ui.loadBookList(ds) }
-	books, _ := ui.store.ListBooksFromDataset(ds.Dir, auxPageSize, 0)
+	books, err := ui.store.ListBooksFromDataset(ds.Dir, auxPageSize, 0)
+	if err != nil {
+		ui.logError("ListBooksFromDataset", err)
+	}
 
 	if len(books) == 0 {
 		ui.setContent(container.NewCenter(widget.NewLabel("暂无书目\n\n请先在设置中导入数据")))
@@ -397,7 +417,10 @@ func (ui *AppUI) loadBookList(ds model.Dataset) {
 
 func (ui *AppUI) loadBookPoems(ds model.Dataset, book string) {
 	ui.listRebuild = func() { ui.loadBookPoems(ds, book) }
-	poems, _ := ui.store.ListPoemsByBookInDataset(ds.Dir, book, auxPageSize, 0)
+	poems, err := ui.store.ListPoemsByBookInDataset(ds.Dir, book, auxPageSize, 0)
+	if err != nil {
+		ui.logError("ListPoemsByBookInDataset", err)
+	}
 	ui.poems = poems
 	list := ui.makePoemList()
 
@@ -412,7 +435,10 @@ func (ui *AppUI) loadBookPoems(ds model.Dataset, book string) {
 
 func (ui *AppUI) loadAuthorList(dynasty model.Dynasty) {
 	ui.listRebuild = func() { ui.loadAuthorList(dynasty) }
-	authors, _ := ui.store.ListAuthorsFromPoems(dynasty, auxPageSize, 0)
+	authors, err := ui.store.ListAuthorsFromPoems(dynasty, auxPageSize, 0)
+	if err != nil {
+		ui.logError("ListAuthorsFromPoems", err)
+	}
 
 	list := widget.NewList(
 		func() int { return len(authors) },
@@ -441,7 +467,10 @@ func (ui *AppUI) loadAuthorList(dynasty model.Dynasty) {
 
 func (ui *AppUI) loadAuthorPoems(author string) {
 	ui.listRebuild = func() { ui.loadAuthorPoems(author) }
-	poems, _ := ui.store.ListPoemsByAuthor(author, auxPageSize, 0)
+	poems, err := ui.store.ListPoemsByAuthor(author, auxPageSize, 0)
+	if err != nil {
+		ui.logError("ListPoemsByAuthor", err)
+	}
 	ui.poems = poems
 	list := ui.makePoemList()
 
@@ -543,7 +572,9 @@ func (ui *AppUI) makeReaderView(poem *model.Poem) fyne.CanvasObject {
 			if ui.fontSize > 12 {
 				ui.fontSize--
 			}
-			_ = ui.store.SetFontSize(ui.fontSize)
+			if err := ui.store.SetFontSize(ui.fontSize); err != nil {
+				ui.logError("SetFontSize", err)
+			}
 			ui.setContent(ui.makeReaderView(poem))
 		}),
 		container.NewCenter(container.NewVBox(
@@ -554,7 +585,9 @@ func (ui *AppUI) makeReaderView(poem *model.Poem) fyne.CanvasObject {
 			if ui.fontSize < 48 {
 				ui.fontSize++
 			}
-			_ = ui.store.SetFontSize(ui.fontSize)
+			if err := ui.store.SetFontSize(ui.fontSize); err != nil {
+				ui.logError("SetFontSize", err)
+			}
 			ui.setContent(ui.makeReaderView(poem))
 		}),
 	)
@@ -598,7 +631,10 @@ func (ui *AppUI) makeReaderView(poem *model.Poem) fyne.CanvasObject {
 	}
 
 	// Favorite button
-	collected, _ := ui.store.IsCollected(poem.ID)
+	collected, err := ui.store.IsCollected(poem.ID)
+	if err != nil {
+		ui.logError("IsCollected", err)
+	}
 	favText := "收藏"
 	if collected {
 		favText = "取消收藏"
@@ -656,7 +692,10 @@ func (ui *AppUI) loadSearch() {
 	items = append(items, container.NewBorder(nil, nil, nil, searchBtn, entry))
 	items = append(items, widget.NewSeparator())
 
-	history, _ := ui.store.ListSearchHistory()
+	history, err := ui.store.ListSearchHistory()
+	if err != nil {
+		ui.logError("ListSearchHistory", err)
+	}
 	histLabel := widget.NewLabel("搜索历史")
 	histLabel.TextStyle = fyne.TextStyle{Bold: true}
 	items = append(items, histLabel)
@@ -671,7 +710,9 @@ func (ui *AppUI) loadSearch() {
 		}
 		items = append(items, histBox)
 		clearBtn := widget.NewButtonWithIcon("清空搜索历史", theme.DeleteIcon(), func() {
-			_ = ui.store.ClearSearchHistory()
+			if err := ui.store.ClearSearchHistory(); err != nil {
+				ui.logError("ClearSearchHistory", err)
+			}
 			ui.loadSearch()
 		})
 		items = append(items, container.NewCenter(clearBtn))
@@ -687,7 +728,9 @@ func (ui *AppUI) performSearch(q string) {
 	if q == "" {
 		return
 	}
-	_ = ui.store.AddSearchHistory(q)
+	if err := ui.store.AddSearchHistory(q); err != nil {
+		ui.logError("AddSearchHistory", err)
+	}
 	poems, err := ui.store.SearchPoems(q, 200, 0)
 	if err != nil {
 		dialog.ShowError(err, ui.window)
@@ -714,7 +757,10 @@ func (ui *AppUI) loadCollections() {
 	ui.listRebuild = func() { ui.loadCollections() }
 	ui.poems = nil
 
-	poems, _ := ui.store.ListCollections(collectionLimit, 0)
+	poems, err := ui.store.ListCollections(collectionLimit, 0)
+	if err != nil {
+		ui.logError("ListCollections", err)
+	}
 	ui.poems = poems
 
 	if len(poems) == 0 {
@@ -739,8 +785,8 @@ func (ui *AppUI) loadCollections() {
 			if !confirmed {
 				return
 			}
-			for _, p := range poems {
-				ui.store.ToggleCollection(p.ID)
+			if err := ui.store.ClearAllCollections(); err != nil {
+				ui.logError("ClearAllCollections", err)
 			}
 			ui.loadCollections()
 		}, ui.window)
@@ -753,7 +799,10 @@ func (ui *AppUI) loadCollections() {
 }
 
 func (ui *AppUI) exportCollections() {
-	poems, _ := ui.store.ListCollections(exportLimit, 0)
+	poems, err := ui.store.ListCollections(exportLimit, 0)
+	if err != nil {
+		ui.logError("ListCollections", err)
+	}
 	if len(poems) == 0 {
 		dialog.ShowInformation("提示", "暂无收藏，无法导出", ui.window)
 		return
@@ -769,7 +818,7 @@ func (ui *AppUI) exportCollections() {
 	}
 
 	path := filepath.Join(ui.dataDir, "collections_export.txt")
-	err := os.WriteFile(path, []byte(sb.String()), 0644)
+	err = os.WriteFile(path, []byte(sb.String()), 0644)
 	if err != nil {
 		dialog.ShowError(err, ui.window)
 		return
@@ -798,14 +847,18 @@ func (ui *AppUI) loadSettings() {
 			if ui.fontSize > 12 {
 				ui.fontSize--
 			}
-			_ = ui.store.SetFontSize(ui.fontSize)
+			if err := ui.store.SetFontSize(ui.fontSize); err != nil {
+				ui.logError("SetFontSize", err)
+			}
 			ui.loadSettings()
 		}),
 		widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
 			if ui.fontSize < 48 {
 				ui.fontSize++
 			}
-			_ = ui.store.SetFontSize(ui.fontSize)
+			if err := ui.store.SetFontSize(ui.fontSize); err != nil {
+				ui.logError("SetFontSize", err)
+			}
 			ui.loadSettings()
 		}),
 	))
@@ -829,12 +882,18 @@ func (ui *AppUI) loadSettings() {
 	dataLabel.TextStyle = fyne.TextStyle{Bold: true}
 	items = append(items, dataLabel, widget.NewSeparator())
 
-	count, _ := ui.store.PoemCount("")
+	count, err := ui.store.PoemCount("")
+	if err != nil {
+		ui.logError("PoemCount", err)
+	}
 	items = append(items, widget.NewLabel(fmt.Sprintf("本地诗词总数: %d", count)))
 
 	// One grouped pass over every dataset count instead of 18 prefix COUNT
 	// scans: the settings page opens with this loop on every visit.
-	datasetCounts, _ := ui.store.PoemCountsAllDatasets()
+	datasetCounts, err := ui.store.PoemCountsAllDatasets()
+	if err != nil {
+		ui.logError("PoemCountsAllDatasets", err)
+	}
 	for _, ds := range model.Datasets {
 		ds := ds
 		dsCount := datasetCounts[ds.Dir]
@@ -862,7 +921,9 @@ func (ui *AppUI) loadSettings() {
 				for _, ds := range model.Datasets {
 					fmt.Printf("Downloading %s...\n", ds.Name)
 					f := fetcher.New(ui.dataDir, ui.store, nil)
-					_ = f.DownloadAndImport(ds)
+					if err := f.DownloadAndImport(ds); err != nil {
+						ui.logError("DownloadAndImport "+ds.Name, err)
+					}
 				}
 				fyne.Do(func() {
 					if ui.isOn(navSettings) {
@@ -885,7 +946,9 @@ func (ui *AppUI) loadSettings() {
 	// Clear search history
 	items = append(items, container.NewCenter(
 		widget.NewButtonWithIcon("清空搜索历史", theme.DeleteIcon(), func() {
-			_ = ui.store.ClearSearchHistory()
+			if err := ui.store.ClearSearchHistory(); err != nil {
+				ui.logError("ClearSearchHistory", err)
+			}
 			dialog.ShowInformation("已清空", "搜索历史已清空", ui.window)
 		}),
 	))
@@ -920,7 +983,7 @@ func (ui *AppUI) loadSettings() {
 	aboutLabel := widget.NewLabel("关于")
 	aboutLabel.TextStyle = fyne.TextStyle{Bold: true}
 	items = append(items, aboutLabel, widget.NewSeparator())
-	items = append(items, widget.NewLabel("中华诗词桌面客户端 v1.0"))
+	items = append(items, widget.NewLabel(fmt.Sprintf("中华诗词桌面客户端 v%s", ui.version)))
 	items = append(items, widget.NewLabel("数据来源: chinese-poetry-simplify"))
 
 	ui.setContent(container.NewScroll(container.NewVBox(items...)))
@@ -931,7 +994,8 @@ func (ui *AppUI) downloadDataset(ds model.Dataset) {
 		fmt.Printf("[%s] %s %d/%d %s\n", p.Dataset, p.File, p.Current, p.Total, p.Message)
 	})
 	if err := f.DownloadAndImport(ds); err != nil {
-		fmt.Printf("download error: %v\n", err)
+		ui.logError("DownloadAndImport "+ds.Name, err)
+		dialog.ShowError(err, ui.window)
 	}
 	fyne.Do(func() {
 		if ui.isOn(navSettings) {
